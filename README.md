@@ -10,6 +10,9 @@ Practical configuration files and scripts for Ubuntu 24.04 on the ASUS ROG Zephy
 - [configs/NetworkManager/wifi-powersave-off.conf](configs/NetworkManager/wifi-powersave-off.conf): Disables WiFi powersave in NetworkManager.
 - [configs/mt76-pm-fix/revert-to-stock-oem.sh](configs/mt76-pm-fix/revert-to-stock-oem.sh): Resets MT7925 WiFi to stock OEM baseline.
 - [configs/power/g14-power-mode.sh](configs/power/g14-power-mode.sh): Maps Ubuntu power profile + AC/DC to ASUS profile and GPU policy.
+- [configs/power/g14-set-refresh.py](configs/power/g14-set-refresh.py): Applies monitor refresh changes via GNOME Mutter DisplayConfig.
+- [configs/power/root/g14-cpu-policy-apply.sh](configs/power/root/g14-cpu-policy-apply.sh): Root helper to apply CPU boost/EPP/governor policy.
+- [configs/power/root/install-root-cpu-helper.sh](configs/power/root/install-root-cpu-helper.sh): One-time installer for passwordless sudo rule (CPU helper only).
 - [configs/power/install.sh](configs/power/install.sh): Installs user service and applies startup defaults for power mapping.
 - [configs/power/systemd-user/g14-power-acdc-monitor.service](configs/power/systemd-user/g14-power-acdc-monitor.service): Re-applies mapping when AC state or Ubuntu power profile changes.
 - [configs/power/systemd-user/g14-power-startup-eco.service](configs/power/systemd-user/g14-power-startup-eco.service): Forces startup default to Eco (`Power Saver`) on login.
@@ -69,6 +72,7 @@ sudo systemctl restart NetworkManager
 ```bash
 bash configs/power/install.sh
 sudo systemctl enable --now supergfxd.service
+sudo bash configs/power/root/install-root-cpu-helper.sh
 ```
 
 This keeps Ubuntu's built-in top-right power menu as the only mode selector.
@@ -85,12 +89,12 @@ The active Ubuntu power profile (`Power Saver`, `Balanced`, `Performance`) is ma
 
 | Ubuntu menu selection | Power source | ASUS profile | GPU policy | Intent |
 |---|---|---|---|---|
-| Power Saver | Battery (DC) | Quiet | Integrated | Ultra power saving |
+| Power Saver | Battery (DC) | Quiet | Integrated | Ultra power saving (60 Hz) |
 | Balanced | Battery (DC) | Balanced | Hybrid | Moderate savings |
 | Performance | Battery (DC) | Performance | Hybrid | Maximum performance without reboot-required MUX switching |
-| Power Saver | AC | Balanced | Hybrid | Quiet daily use |
-| Balanced | AC | Balanced | Hybrid | Quiet daily use |
-| Performance | AC | Performance | Hybrid | Maximum performance without reboot-required MUX switching |
+| Power Saver | AC | Balanced | Hybrid | Quiet daily use (120 Hz) |
+| Balanced | AC | Balanced | Hybrid | Quiet daily use (120 Hz) |
+| Performance | AC | Performance | Hybrid | Maximum performance without reboot-required MUX switching (120 Hz) |
 
 Notes:
 
@@ -102,6 +106,12 @@ Notes:
 - Startup default is `Power Saver`.
 - Startup default is enforced on each login by `g14-power-startup-eco.service`.
 - Startup service retries for up to ~60 seconds to handle early-session authorization timing.
+- Refresh rate is mapped automatically by power source: `60 Hz` on battery and `120 Hz` on AC.
+- Refresh switching uses GNOME Mutter DisplayConfig (`g14-set-refresh.py`) on GNOME Wayland, with `gnome-randr`/`xrandr` fallback.
+- Optional overrides: `G14_REFRESH_DC_HZ`, `G14_REFRESH_AC_HZ`, `G14_REFRESH_OUTPUT`.
+- CPU policy mapping: `power-saver` disables CPU boost + `power` EPP + `powersave` governor; `balanced` uses boost on + `balance_power` EPP + `powersave` governor; `performance` uses boost on + `performance` EPP + `performance` governor.
+- CPU boost/EPP/governor switching is applied automatically through the root helper installed by `install-root-cpu-helper.sh`.
+- For full `performance` mode, verify `/sys/devices/system/cpu/cpufreq/boost` is `1`.
 
 ## WiFi verification
 

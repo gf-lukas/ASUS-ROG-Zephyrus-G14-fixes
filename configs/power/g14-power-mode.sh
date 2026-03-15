@@ -6,6 +6,13 @@ STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/g14-power"
 LOG_FILE="$STATE_DIR/apply.log"
 REPORTED_MODE_FILE="$STATE_DIR/reported_mode"
 NOTIFY_STATE_FILE="$STATE_DIR/last_notify"
+REFRESH_STATE_FILE="$STATE_DIR/last_refresh_target"
+REFRESH_DC_HZ="${G14_REFRESH_DC_HZ:-60}"
+REFRESH_AC_HZ="${G14_REFRESH_AC_HZ:-120}"
+REFRESH_OUTPUT="${G14_REFRESH_OUTPUT:-auto}"
+REFRESH_HELPER="${HOME}/.local/bin/g14-set-refresh.py"
+CPU_BOOST_PATH="/sys/devices/system/cpu/cpufreq/boost"
+CPU_POLICY_HELPER="${G14_CPU_POLICY_HELPER:-/usr/local/bin/g14-cpu-policy-apply.sh}"
 
 mkdir -p "$STATE_DIR"
 
@@ -31,6 +38,180 @@ normalize() {
   echo "$1" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9'
 }
 
+is_positive_number() {
+  [[ "$1" =~ ^[0-9]+([.][0-9]+)?$ ]]
+}
+
+set_cpu_boost() {
+  local target="$1"
+
+  if [[ ! -e "$CPU_BOOST_PATH" ]]; then
+    warn "CPU boost control not available at $CPU_BOOST_PATH"
+    return
+  fi
+
+  if [[ ! -w "$CPU_BOOST_PATH" ]]; then
+    warn "Cannot write CPU boost policy (need elevated permissions): $CPU_BOOST_PATH"
+    return
+  fi
+
+  local current
+  current="$(cat "$CPU_BOOST_PATH" 2>/dev/null || true)"
+  if [[ "$current" == "$target" ]]; then
+    return
+  fi
+
+  if printf '%s\n' "$target" > "$CPU_BOOST_PATH" 2>/dev/null; then
+    if [[ "$target" == "0" ]]; then
+      log "Set CPU boost: disabled"
+    else
+      log "Set CPU boost: enabled"
+    fi
+  else
+    warn "Failed to set CPU boost to $target"
+  fi
+}
+
+set_epp() {
+  local desired="$1"
+  local file
+  local has_any="no"
+  local writable_any="no"
+  local wrote_any="no"
+
+  shopt -s nullglob
+  for file in /sys/devices/system/cpu/cpufreq/policy*/energy_performance_preference; do
+    has_any="yes"
+    [[ -w "$file" ]] && writable_any="yes"
+  done
+
+  if [[ "$has_any" == "no" ]]; then
+    shopt -u nullglob
+    return
+  fi
+
+  if [[ "$writable_any" == "no" ]]; then
+    warn "Cannot write EPP policy (need elevated permissions)"
+    shopt -u nullglob
+    return
+  fi
+
+  for file in /sys/devices/system/cpu/cpufreq/policy*/energy_performance_preference; do
+    [[ -w "$file" ]] || continue
+
+    if printf '%s\n' "$desired" > "$file" 2>/dev/null; then
+      wrote_any="yes"
+    else
+      warn "Failed to set EPP '$desired' on $file"
+    fi
+  done
+  shopt -u nullglob
+
+  if [[ "$wrote_any" == "yes" ]]; then
+    log "Set CPU EPP policy: $desired"
+  fi
+}
+
+set_cpu_governor() {
+  local desired="$1"
+  local file avail current
+  local has_any="no"
+  local writable_any="no"
+  local wrote_any="no"
+
+  shopt -s nullglob
+  for file in /sys/devices/system/cpu/cpufreq/policy*/scaling_governor; do
+    has_any="yes"
+    [[ -r "$file" && -w "$file" ]] && writable_any="yes"
+  done
+
+  if [[ "$has_any" == "no" ]]; then
+    shopt -u nullglob
+    return
+  fi
+
+  if [[ "$writable_any" == "no" ]]; then
+    warn "Cannot write CPU governor (need elevated permissions)"
+    shopt -u nullglob
+    return
+  fi
+
+  for file in /sys/devices/system/cpu/cpufreq/policy*/scaling_governor; do
+    [[ -r "$file" && -w "$file" ]] || continue
+
+    avail="$(cat "${file%/*}/scaling_available_governors" 2>/dev/null || true)"
+    if [[ -n "$avail" && ! " $avail " =~ [[:space:]]${desired}[[:space:]] ]]; then
+      continue
+    fi
+
+    current="$(cat "$file" 2>/dev/null || true)"
+    if [[ "$current" == "$desired" ]]; then
+      continue
+    fi
+
+    if printf '%s\n' "$desired" > "$file" 2>/dev/null; then
+      wrote_any="yes"
+    else
+      warn "Failed to set CPU governor '$desired' on $file"
+    fi
+  done
+  shopt -u nullglob
+
+  if [[ "$wrote_any" == "yes" ]]; then
+    log "Set CPU governor: $desired"
+  fi
+}
+
+apply_cpu_policy_with_root_helper() {
+  local ppd="$1"
+
+  [[ -x "$CPU_POLICY_HELPER" ]] || return 1
+  has_cmd sudo || return 1
+
+  if sudo -n "$CPU_POLICY_HELPER" "$ppd" >/dev/null 2>&1; then
+    log "Applied CPU policy via root helper: $ppd"
+    return 0
+  fi
+
+  warn "Root CPU helper exists but passwordless sudo is not configured or failed"
+  return 1
+}
+
+apply_cpu_policy() {
+  local ppd="$1"
+
+  if apply_cpu_policy_with_root_helper "$ppd"; then
+    return
+  fi
+
+  case "$ppd" in
+    power-saver)
+      set_cpu_boost "0"
+      set_epp "power"
+      set_cpu_governor "powersave"
+      ;;
+    balanced)
+      set_cpu_boost "1"
+      set_epp "balance_power"
+      set_cpu_governor "powersave"
+      ;;
+    performance)
+      set_cpu_boost "1"
+      set_epp "performance"
+      set_cpu_governor "performance"
+      ;;
+  esac
+
+  if [[ "$ppd" == "performance" && -r "$CPU_BOOST_PATH" ]]; then
+    local boost_now
+    boost_now="$(cat "$CPU_BOOST_PATH" 2>/dev/null || true)"
+    if [[ "$boost_now" != "1" ]]; then
+      warn "Performance mode active but CPU boost is '$boost_now' (expected 1); max performance is not fully enabled"
+      warn "Run once with sudo: echo 1 > $CPU_BOOST_PATH"
+    fi
+  fi
+}
+
 get_power_source() {
   local ac
   for ac in /sys/class/power_supply/AC*/online /sys/class/power_supply/ADP*/online /sys/class/power_supply/ACAD/online; do
@@ -54,6 +235,108 @@ get_power_source() {
   fi
 
   echo "dc"
+}
+
+select_refresh_target() {
+  local source="$1"
+  if [[ "$source" == "dc" ]]; then
+    echo "$REFRESH_DC_HZ"
+  else
+    echo "$REFRESH_AC_HZ"
+  fi
+}
+
+detect_output_xrandr() {
+  if [[ "$REFRESH_OUTPUT" != "auto" ]]; then
+    echo "$REFRESH_OUTPUT"
+    return
+  fi
+
+  xrandr --query 2>/dev/null | awk '
+    / connected/ {
+      if ($1 ~ /^eDP/ || $1 ~ /^EDP/ || $1 ~ /^LVDS/ || $1 ~ /^DSI/) {
+        print $1
+        exit
+      }
+      if (first == "") {
+        first = $1
+      }
+    }
+    END {
+      if (first != "") {
+        print first
+      }
+    }
+  '
+}
+
+set_refresh_rate_xrandr() {
+  local target_hz="$1"
+  local output
+
+  has_cmd xrandr || return 1
+  xrandr --query >/dev/null 2>&1 || return 1
+
+  output="$(detect_output_xrandr)"
+  [[ -n "$output" ]] || return 1
+
+  xrandr --output "$output" --rate "$target_hz" >/dev/null 2>&1 || return 1
+  log "Set display refresh via xrandr: output=$output rate=${target_hz}Hz"
+  return 0
+}
+
+set_refresh_rate_mutter() {
+  local target_hz="$1"
+
+  [[ -x "$REFRESH_HELPER" ]] || return 1
+  command -v /usr/bin/python3 >/dev/null 2>&1 || return 1
+
+  /usr/bin/python3 "$REFRESH_HELPER" --hz "$target_hz" --output "$REFRESH_OUTPUT" >/dev/null 2>&1 || return 1
+  log "Set display refresh via Mutter DisplayConfig: output=${REFRESH_OUTPUT} rate=${target_hz}Hz"
+  return 0
+}
+
+set_refresh_rate_gnome_randr() {
+  local target_hz="$1"
+  local output
+
+  has_cmd gnome-randr || return 1
+
+  if [[ "$REFRESH_OUTPUT" != "auto" ]]; then
+    output="$REFRESH_OUTPUT"
+  else
+    output="$(gnome-randr query 2>/dev/null | awk '/ connected/{print $1; exit}')"
+  fi
+
+  [[ -n "$output" ]] || return 1
+
+  gnome-randr modify "$output" --rate "$target_hz" >/dev/null 2>&1 || return 1
+  log "Set display refresh via gnome-randr: output=$output rate=${target_hz}Hz"
+  return 0
+}
+
+apply_refresh_rate_policy() {
+  local source="$1"
+  local target_hz
+  local key
+
+  target_hz="$(select_refresh_target "$source")"
+  if ! is_positive_number "$target_hz"; then
+    warn "Invalid refresh target '$target_hz'; expected number"
+    return
+  fi
+
+  key="${source}:${target_hz}"
+  if [[ -f "$REFRESH_STATE_FILE" ]] && [[ "$(cat "$REFRESH_STATE_FILE" 2>/dev/null || true)" == "$key" ]]; then
+    return
+  fi
+
+  if set_refresh_rate_mutter "$target_hz" || set_refresh_rate_gnome_randr "$target_hz" || set_refresh_rate_xrandr "$target_hz"; then
+    printf '%s\n' "$key" > "$REFRESH_STATE_FILE"
+    return
+  fi
+
+  warn "Could not set display refresh to ${target_hz}Hz (install gnome-randr for GNOME Wayland, or use X11 xrandr)"
 }
 
 set_asus_profile() {
@@ -373,9 +656,12 @@ apply_profile_mapping() {
     return
   fi
 
+  apply_cpu_policy "$ppd"
+
   if [[ "$ppd" == "performance" ]]; then
     set_asus_profile "Performance"
     set_gpu_mode "hybrid" "$logout_on_pending"
+    apply_refresh_rate_policy "$source"
     log "Applied mapping: ppd=performance source=$source"
     return
   fi
@@ -383,12 +669,14 @@ apply_profile_mapping() {
   if [[ "$source" == "dc" && "$ppd" == "power-saver" ]]; then
     set_asus_profile "Quiet"
     set_gpu_mode "integrated" "$logout_on_pending"
+    apply_refresh_rate_policy "$source"
     log "Applied mapping: ppd=power-saver source=dc"
     return
   fi
 
   set_asus_profile "Balanced"
   set_gpu_mode "hybrid" "$logout_on_pending"
+  apply_refresh_rate_policy "$source"
   log "Applied mapping: ppd=$ppd source=$source (balanced policy)"
 }
 
