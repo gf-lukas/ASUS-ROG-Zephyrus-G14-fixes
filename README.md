@@ -13,9 +13,12 @@ Practical configuration files and scripts for Ubuntu 24.04 on the ASUS ROG Zephy
 - [configs/power/g14-set-refresh.py](configs/power/g14-set-refresh.py): Applies monitor refresh changes via GNOME Mutter DisplayConfig.
 - [configs/power/root/g14-cpu-policy-apply.sh](configs/power/root/g14-cpu-policy-apply.sh): Root helper to apply CPU boost/EPP/governor policy.
 - [configs/power/root/install-root-cpu-helper.sh](configs/power/root/install-root-cpu-helper.sh): One-time installer for passwordless sudo rule (CPU helper only).
+- [configs/power/root/g14-gpu-boot-mode.sh](configs/power/root/g14-gpu-boot-mode.sh): Root boot helper that sets `supergfxd` mode from AC/DC before login.
+- [configs/power/root/install-root-gpu-boot-helper.sh](configs/power/root/install-root-gpu-boot-helper.sh): One-time installer for the boot-time GPU mode service.
 - [configs/power/install.sh](configs/power/install.sh): Installs user service and applies startup defaults for power mapping.
 - [configs/power/systemd-user/g14-power-acdc-monitor.service](configs/power/systemd-user/g14-power-acdc-monitor.service): Re-applies mapping when AC state or Ubuntu power profile changes.
 - [configs/power/systemd-user/g14-power-startup-eco.service](configs/power/systemd-user/g14-power-startup-eco.service): Forces startup default to Eco (`Power Saver`) on login.
+- [configs/power/systemd-system/g14-gpu-boot-mode.service](configs/power/systemd-system/g14-gpu-boot-mode.service): Applies GPU policy at boot (battery=`Integrated`, AC=`Hybrid`) before display manager.
 
 ## Target setup
 
@@ -73,6 +76,7 @@ sudo systemctl restart NetworkManager
 bash configs/power/install.sh
 sudo systemctl enable --now supergfxd.service
 sudo bash configs/power/root/install-root-cpu-helper.sh
+sudo bash configs/power/root/install-root-gpu-boot-helper.sh
 ```
 
 This keeps Ubuntu's built-in top-right power menu as the only mode selector.
@@ -92,25 +96,26 @@ The active Ubuntu power profile (`Power Saver`, `Balanced`, `Performance`) is ma
 | Power Saver | Battery (DC) | Quiet | Integrated | Ultra power saving (60 Hz) |
 | Balanced | Battery (DC) | Balanced | Hybrid | Moderate savings |
 | Performance | Battery (DC) | Performance | Hybrid | Maximum performance without reboot-required MUX switching |
-| Power Saver | AC | Balanced | Hybrid | Quiet daily use (120 Hz) |
+| Power Saver | AC | Quiet | Hybrid | Quiet daily use (120 Hz) |
 | Balanced | AC | Balanced | Hybrid | Quiet daily use (120 Hz) |
 | Performance | AC | Performance | Hybrid | Maximum performance without reboot-required MUX switching (120 Hz) |
 
 Notes:
 
-- On AC, `Power Saver` and `Balanced` intentionally use the same quiet hybrid policy.
-- GPU mode changes may require a session reload/log out depending on current mode.
+- On AC, `Power Saver` now maps to ASUS `Quiet` (not `Balanced`) so the profile does not bounce back to `Balanced`.
+- On reboot, GPU mode is pre-selected before login: battery boot uses `Integrated`, AC boot uses `Hybrid`.
+- Runtime GPU mode changes during an active session may still require a session reload/log out depending on current mode.
 - The background monitor never forces logout; logout/reload is manual when required.
 - If a transition is pending, a GNOME desktop notification is shown.
 - This setup intentionally avoids MUX dGPU mode for profile switching, to keep mode changes reboot-free.
-- Startup default is `Power Saver`.
-- Startup default is enforced on each login by `g14-power-startup-eco.service`.
+- Startup default is `Power Saver` and is enforced on each login by `g14-power-startup-eco.service`.
 - Startup service retries for up to ~60 seconds to handle early-session authorization timing.
 - Refresh rate is mapped automatically by power source: `60 Hz` on battery and `120 Hz` on AC.
 - Refresh switching uses GNOME Mutter DisplayConfig (`g14-set-refresh.py`) on GNOME Wayland, with `gnome-randr`/`xrandr` fallback.
 - Optional overrides: `G14_REFRESH_DC_HZ`, `G14_REFRESH_AC_HZ`, `G14_REFRESH_OUTPUT`.
 - CPU policy mapping: `power-saver` disables CPU boost + `power` EPP + `powersave` governor; `balanced` uses boost on + `balance_power` EPP + `powersave` governor; `performance` uses boost on + `performance` EPP + `performance` governor.
 - CPU boost/EPP/governor switching is applied automatically through the root helper installed by `install-root-cpu-helper.sh`.
+- The AC/DC monitor re-applies mapping after suspend/resume wake (long watcher gap detection), even if power profile and power source did not change.
 - For full `performance` mode, verify `/sys/devices/system/cpu/cpufreq/boost` is `1`.
 
 ## WiFi verification
@@ -153,6 +158,28 @@ If mismatch indicates missing dGPU PCI device while `Hybrid`/`Performance` is ex
 ```bash
 sudo sh -c 'echo 1 > /sys/bus/pci/rescan'
 nvidia-smi -L
+```
+
+Troubleshooting note:
+
+- Avoid restarting `supergfxd.service` from an active GNOME session unless you are prepared for session termination; `supergfxd` may kill processes holding `/dev/nvidia0` (for example `gnome-shell`/`Xwayland`) while switching to `Integrated`.
+- Prefer this safe recovery flow first:
+
+```bash
+# Re-apply policy without forced session changes
+bash configs/power/g14-power-mode.sh apply --logout-on-pending no
+
+# Check consistency
+bash configs/power/g14-power-mode.sh status
+bash configs/power/g14-power-mode.sh check || true
+```
+
+- If WiFi drops after wake and logs show `rfkill` soft/hard toggles, recover radio state:
+
+```bash
+rfkill list
+nmcli radio wifi on
+sudo rfkill unblock all
 ```
 
 ## Reset to stock OEM WiFi baseline

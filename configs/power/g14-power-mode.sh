@@ -666,11 +666,15 @@ apply_profile_mapping() {
     return
   fi
 
-  if [[ "$source" == "dc" && "$ppd" == "power-saver" ]]; then
+  if [[ "$ppd" == "power-saver" ]]; then
     set_asus_profile "Quiet"
-    set_gpu_mode "integrated" "$logout_on_pending"
+    if [[ "$source" == "dc" ]]; then
+      set_gpu_mode "integrated" "$logout_on_pending"
+    else
+      set_gpu_mode "hybrid" "$logout_on_pending"
+    fi
     apply_refresh_rate_policy "$source"
-    log "Applied mapping: ppd=power-saver source=dc"
+    log "Applied mapping: ppd=power-saver source=$source"
     return
   fi
 
@@ -720,16 +724,28 @@ EOF
 watch_loop() {
   local last_source=""
   local last_ppd=""
+  local last_tick
+  last_tick="$(date +%s)"
   while true; do
-    local now_source now_ppd
+    local now_source now_ppd now_tick tick_gap force_apply
     now_source="$(get_power_source)"
     now_ppd="$(get_ppd)"
-    if [[ "$now_source" != "$last_source" || "$now_ppd" != "$last_ppd" ]]; then
+    now_tick="$(date +%s)"
+    tick_gap=$((now_tick - last_tick))
+    force_apply="no"
+
+    if (( tick_gap > 20 )); then
+      force_apply="yes"
+      log "Long wake gap detected (${tick_gap}s); re-applying mapping"
+    fi
+
+    if [[ "$force_apply" == "yes" || "$now_source" != "$last_source" || "$now_ppd" != "$last_ppd" ]]; then
       log "Change detected: source ${last_source:-unknown} -> $now_source, ppd ${last_ppd:-unknown} -> $now_ppd"
       apply_profile_mapping "no"
       last_source="$now_source"
       last_ppd="$now_ppd"
     fi
+    last_tick="$now_tick"
     sleep 5
   done
 }
