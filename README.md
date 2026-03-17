@@ -13,12 +13,9 @@ Practical configuration files and scripts for Ubuntu 24.04 on the ASUS ROG Zephy
 - [configs/power/g14-set-refresh.py](configs/power/g14-set-refresh.py): Applies monitor refresh changes via GNOME Mutter DisplayConfig.
 - [configs/power/root/g14-cpu-policy-apply.sh](configs/power/root/g14-cpu-policy-apply.sh): Root helper to apply CPU boost/EPP/governor policy.
 - [configs/power/root/install-root-cpu-helper.sh](configs/power/root/install-root-cpu-helper.sh): One-time installer for passwordless sudo rule (CPU helper only).
-- [configs/power/root/g14-gpu-boot-mode.sh](configs/power/root/g14-gpu-boot-mode.sh): Root boot helper that sets `supergfxd` mode from AC/DC before login.
-- [configs/power/root/install-root-gpu-boot-helper.sh](configs/power/root/install-root-gpu-boot-helper.sh): One-time installer for the boot-time GPU mode service.
 - [configs/power/install.sh](configs/power/install.sh): Installs user service and applies startup defaults for power mapping.
 - [configs/power/systemd-user/g14-power-acdc-monitor.service](configs/power/systemd-user/g14-power-acdc-monitor.service): Re-applies mapping when AC state or Ubuntu power profile changes.
 - [configs/power/systemd-user/g14-power-startup-eco.service](configs/power/systemd-user/g14-power-startup-eco.service): Forces startup default to Eco (`Power Saver`) on login.
-- [configs/power/systemd-system/g14-gpu-boot-mode.service](configs/power/systemd-system/g14-gpu-boot-mode.service): Applies GPU policy at boot (battery=`Integrated`, AC=`Hybrid`) before display manager.
 
 ## Target setup
 
@@ -76,7 +73,6 @@ sudo systemctl restart NetworkManager
 bash configs/power/install.sh
 sudo systemctl enable --now supergfxd.service
 sudo bash configs/power/root/install-root-cpu-helper.sh
-sudo bash configs/power/root/install-root-gpu-boot-helper.sh
 ```
 
 This keeps Ubuntu's built-in top-right power menu as the only mode selector.
@@ -103,8 +99,7 @@ The active Ubuntu power profile (`Power Saver`, `Balanced`, `Performance`) is ma
 Notes:
 
 - On AC, `Power Saver` now maps to ASUS `Quiet` (not `Balanced`) so the profile does not bounce back to `Balanced`.
-- On reboot, GPU mode is pre-selected before login: battery boot uses `Integrated`, AC boot uses `Hybrid`.
-- Runtime GPU mode changes during an active session may still require a session reload/log out depending on current mode.
+- GPU mode changes may require a session reload/log out depending on current mode.
 - The background monitor never forces logout; logout/reload is manual when required.
 - If a transition is pending, a GNOME desktop notification is shown.
 - This setup intentionally avoids MUX dGPU mode for profile switching, to keep mode changes reboot-free.
