@@ -102,98 +102,39 @@ Notes:
 - GPU mode changes may require a session reload/log out depending on current mode.
 - The background monitor never forces logout; logout/reload is manual when required.
 - If a transition is pending, a GNOME desktop notification is shown.
-- This setup intentionally avoids MUX dGPU mode for profile switching, to keep mode changes reboot-free.
 - Startup default is `Power Saver` and is enforced on each login by `g14-power-startup-eco.service`.
-- Startup service retries for up to ~60 seconds to handle early-session authorization timing.
 - Refresh rate is mapped automatically by power source: `60 Hz` on battery and `120 Hz` on AC.
-- Refresh switching uses GNOME Mutter DisplayConfig (`g14-set-refresh.py`) on GNOME Wayland, with `gnome-randr`/`xrandr` fallback.
-- Optional overrides: `G14_REFRESH_DC_HZ`, `G14_REFRESH_AC_HZ`, `G14_REFRESH_OUTPUT`.
-- CPU policy mapping: `power-saver` disables CPU boost + `power` EPP + `powersave` governor; `balanced` uses boost on + `balance_power` EPP + `powersave` governor; `performance` uses boost on + `performance` EPP + `performance` governor.
-- CPU boost/EPP/governor switching is applied automatically through the root helper installed by `install-root-cpu-helper.sh`.
-- The AC/DC monitor re-applies mapping after suspend/resume wake (long watcher gap detection), even if power profile and power source did not change.
-- For full `performance` mode, verify `/sys/devices/system/cpu/cpufreq/boost` is `1`.
 
-## WiFi verification
+## Quick verification
 
 Run these checks after reboot:
 
 ```bash
-dkms status | grep -Ei 'mt76|mt7925' || echo "No custom MT76/MT7925 DKMS modules"
-modinfo mt7925e | grep '^filename:'
-apt-cache policy linux-firmware linux-oem-24.04b
-IFACE=$(iw dev | awk '$1=="Interface"{print $2; exit}')
-iw dev "$IFACE" get power_save
-
-# Power mapping status
-bash configs/power/g14-power-mode.sh status
-
-# Power mapping consistency check (exit 0 on match)
-bash configs/power/g14-power-mode.sh check || true
-
-# Current Ubuntu power profile
 powerprofilesctl get
-
-# supergfxd availability (required for GPU policy switching)
-systemctl is-active supergfxd
-```
-
-Expected results:
-
-- No custom MT76/MT7925 DKMS module entries.
-- `mt7925e` from `/lib/modules/<kernel>/kernel/drivers/net/wireless/mediatek/mt76/mt7925/`.
-- `Power save: off`.
-- `supergfxd` active if you want automatic GPU mode switching.
-- `gpu_mode_consistent=yes` in `g14-power-mode.sh status` for the selected profile.
-- `requires_logout=yes` means profile settings are applied but GPU transition needs logout to complete.
-
-If reported and effective GPU mode differ (for example, reported dGPU while hardware is not present), `g14-power-mode.sh check` prints `mismatch: ...` and exits with code `2`.
-
-If mismatch indicates missing dGPU PCI device while `Hybrid`/`Performance` is expected, recover without reboot:
-
-```bash
-sudo sh -c 'echo 1 > /sys/bus/pci/rescan'
-nvidia-smi -L
-```
-
-Troubleshooting note:
-
-- Avoid restarting `supergfxd.service` from an active GNOME session unless you are prepared for session termination; `supergfxd` may kill processes holding `/dev/nvidia0` (for example `gnome-shell`/`Xwayland`) while switching to `Integrated`.
-- Prefer this safe recovery flow first:
-
-```bash
-# Re-apply policy without forced session changes
-bash configs/power/g14-power-mode.sh apply --logout-on-pending no
-
-# Check consistency
+supergfxctl -g
+supergfxctl -S
 bash configs/power/g14-power-mode.sh status
-bash configs/power/g14-power-mode.sh check || true
 ```
 
-- If WiFi drops after wake and logs show `rfkill` soft/hard toggles, recover radio state:
+Expected:
+
+- `supergfxctl` responds quickly.
+- `gpu_mode_consistent=yes` in `g14-power-mode.sh status`.
+- `requires_logout=yes` only when a transition is pending.
+
+## Troubleshooting (only if needed)
+
+If `supergfxctl` hangs and `systemctl restart supergfxd` also hangs:
 
 ```bash
-rfkill list
-nmcli radio wifi on
-sudo rfkill unblock all
+systemctl --user stop g14-power-acdc-monitor.service g14-power-startup-eco.service
+sudo bash configs/power/root/cleanup-obsolete-gpu-boot-helper.sh
+sudo reboot
 ```
 
-## Reset to stock OEM WiFi baseline
-
-If your system previously used custom MT76 tweaks, run:
+If your system previously used custom MT76 tweaks and you want stock OEM WiFi baseline:
 
 ```bash
 sudo bash configs/mt76-pm-fix/revert-to-stock-oem.sh
 sudo reboot
-```
-
-## Diagnostics
-
-```bash
-uname -r
-nvidia-smi
-lspci -nnk | grep -A4 -Ei 'Network|Mediatek|MT7925'
-modinfo mt7925e | grep '^filename:'
-apt-cache policy linux-firmware linux-oem-24.04b
-dconf read /org/gnome/shell/extensions/vitals/hot-sensors
-upower -e | grep BAT
 ```

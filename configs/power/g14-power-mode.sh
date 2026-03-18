@@ -407,6 +407,10 @@ notify_pending_logout() {
   fi
 }
 
+clear_pending_notify_state() {
+  rm -f "$NOTIFY_STATE_FILE" 2>/dev/null || true
+}
+
 supergfx_reported_mode() {
   if [[ -f "$REPORTED_MODE_FILE" ]]; then
     tr -d '[:space:]' < "$REPORTED_MODE_FILE"
@@ -589,6 +593,8 @@ set_gpu_mode() {
       fi
       return
     fi
+  else
+    clear_pending_notify_state
   fi
 
   current="$(supergfx_reported_mode)"
@@ -621,6 +627,8 @@ set_gpu_mode() {
     else
       notify_pending_logout "$target" "$pending_action"
     fi
+  else
+    clear_pending_notify_state
   fi
 
   if ! is_gpu_consistent_with_expected "$desired_class"; then
