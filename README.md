@@ -286,8 +286,8 @@ level in GNOME Sound settings while a call is running (it was saved as 0 once he
 
 A classic Bluetooth device stores one link key per adapter address. Windows and Linux share the adapter but each
 pairing creates a new key, so pairing in one OS invalidates the other. Fix once by giving BlueZ the key Windows
-negotiated (the Windows system partition here is BitLocker-encrypted, so reading its registry from Linux is
-impractical; read the key inside Windows instead):
+negotiated. Reading the Windows registry hive from Linux is impractical on a BitLocker-encrypted Windows partition,
+the default on current laptops, so read the key inside Windows instead:
 
 1. Linux: pair the headset normally so `/var/lib/bluetooth/<adapter>/<device>/info` exists.
 2. Windows: remove and re-pair the headset. Windows now holds the valid key.

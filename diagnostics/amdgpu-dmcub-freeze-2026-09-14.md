@@ -101,5 +101,5 @@ Do not apply. Fix the firmware instead.
 ## Observed while unfixed
 
 Crashes correlated with
-display activity (external Samsung LS32R750Q on the NVIDIA GPU via HDMI,
+display activity (an external monitor on the NVIDIA GPU via HDMI,
 internal eDP on the AMD iGPU).

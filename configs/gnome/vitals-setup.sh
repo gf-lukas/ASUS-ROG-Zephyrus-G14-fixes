@@ -8,7 +8,7 @@
 # `nvidia-smi -l 1` subprocess running for the whole session; that query every second never lets the
 # RTX 5070 Ti reach runtime D3, so in Hybrid mode the dGPU stays in D0 and costs ~8 W on battery
 # (measured 2026-09-21: 18-20 W idle with polling, 10 W without). The wrapper prints N/A while the dGPU
-# is asleep or unused and only queries the real nvidia-smi while a client (RL job, offloaded app) holds it.
+# is asleep or unused and only queries the real nvidia-smi while a client (compute job, offloaded app) holds it.
 
 set -euo pipefail
 
