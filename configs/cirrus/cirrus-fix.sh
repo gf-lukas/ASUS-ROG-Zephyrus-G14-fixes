@@ -5,6 +5,16 @@
 
 set -e
 
+# OBSOLETE since linux-firmware 20240318.git3b128b60-0ubuntu3.x (Sep 2026): the
+# package ships cs35l56-b0-dsp1-misc-10431024-* itself. Refuse to run in that case;
+# use cirrus-cleanup.sh to remove leftovers from earlier runs of this script.
+if [ -e /lib/firmware/cirrus/cs35l56-b0-dsp1-misc-10431024-spkid1-amp1.bin.zst ] \
+   && dpkg -S /lib/firmware/cirrus/cs35l56-b0-dsp1-misc-10431024-spkid1-amp1.bin.zst >/dev/null 2>&1; then
+    echo "linux-firmware already provides the 10431024 CS35L56 files; this fix is not needed."
+    echo "Run: sudo bash configs/cirrus/cirrus-cleanup.sh   (removes leftovers from older runs)"
+    exit 0
+fi
+
 cd /tmp
 
 # Download the base 10431044 firmware files (10431024 uses the same tuning)
