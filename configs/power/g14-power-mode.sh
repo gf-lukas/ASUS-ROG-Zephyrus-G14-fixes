@@ -13,6 +13,16 @@ REFRESH_OUTPUT="${G14_REFRESH_OUTPUT:-auto}"
 REFRESH_HELPER="${HOME}/.local/bin/g14-set-refresh.py"
 CPU_BOOST_PATH="/sys/devices/system/cpu/cpufreq/boost"
 CPU_POLICY_HELPER="${G14_CPU_POLICY_HELPER:-/usr/local/bin/g14-cpu-policy-apply.sh}"
+GPU_RUNTIMEPM_HELPER="${G14_GPU_RUNTIMEPM_HELPER:-/usr/local/bin/g14-gpu-runtimepm-apply.sh}"
+# GPU policy:
+#   hybrid-only : never leave supergfxctl Hybrid; rely on NVIDIA runtime D3 for idle dGPU power-off (no logouts).
+#   acdc        : legacy mapping, Power Saver on battery requests Integrated (every switch needs a logout within 30 s).
+GPU_POLICY_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/g14-power/gpu-policy"
+GPU_POLICY="${G14_GPU_POLICY:-}"
+if [[ -z "$GPU_POLICY" && -r "$GPU_POLICY_FILE" ]]; then
+  GPU_POLICY="$(tr -d '[:space:]' < "$GPU_POLICY_FILE")"
+fi
+GPU_POLICY="${GPU_POLICY:-hybrid-only}"
 
 mkdir -p "$STATE_DIR"
 
@@ -209,6 +219,49 @@ apply_cpu_policy() {
       warn "Performance mode active but CPU boost is '$boost_now' (expected 1); max performance is not fully enabled"
       warn "Run once with sudo: echo 1 > $CPU_BOOST_PATH"
     fi
+  fi
+}
+
+apply_gpu_runtimepm_with_root_helper() {
+  [[ -x "$GPU_RUNTIMEPM_HELPER" ]] || return 1
+  has_cmd sudo || return 1
+
+  if sudo -n "$GPU_RUNTIMEPM_HELPER" >/dev/null 2>&1; then
+    log "Applied dGPU runtime PM via root helper"
+    return 0
+  fi
+
+  warn "Root GPU runtime PM helper exists but passwordless sudo is not configured or failed"
+  return 1
+}
+
+enforce_dgpu_runtimepm_auto() {
+  local need_fix="no"
+
+  if [[ "$(effective_gpu_class)" == "integrated" ]]; then
+    return
+  fi
+
+  if dgpu_pci_present; then
+    need_fix="yes"
+  fi
+
+  [[ "$need_fix" == "yes" ]] || return
+
+  if apply_gpu_runtimepm_with_root_helper; then
+    return
+  fi
+
+  local bdf dev
+  bdf="$(find_nvidia_gpu_bdf || true)"
+  [[ -n "$bdf" ]] || return
+  dev="/sys/bus/pci/devices/$bdf"
+
+  if [[ -w "$dev/power/control" ]]; then
+    printf '%s\n' auto > "$dev/power/control" 2>/dev/null || true
+    log "Set dGPU runtime PM to auto (direct): bdf=$bdf"
+  else
+    warn "Cannot set dGPU runtime PM to auto (need elevated permissions): $dev/power/control"
   fi
 }
 
@@ -460,8 +513,27 @@ dgpu_pci_present() {
   [[ -n "$(find_nvidia_gpu_bdf || true)" ]]
 }
 
-nvidia_userspace_ready() {
-  has_cmd nvidia-smi && nvidia-smi -L >/dev/null 2>&1
+dgpu_runtimepm_suspended() {
+  local bdf dev control status pstate
+  bdf="$(find_nvidia_gpu_bdf || true)"
+  [[ -n "$bdf" ]] || return 1
+
+  dev="/sys/bus/pci/devices/$bdf"
+  [[ -r "$dev/power/control" && -r "$dev/power/runtime_status" && -r "$dev/power_state" ]] || return 1
+
+  control="$(cat "$dev/power/control" 2>/dev/null || true)"
+  status="$(cat "$dev/power/runtime_status" 2>/dev/null || true)"
+  pstate="$(cat "$dev/power_state" 2>/dev/null || true)"
+
+  [[ "$control" == "auto" && "$status" == "suspended" && "$pstate" == D3* ]]
+}
+
+# Driver binding is read from sysfs on purpose: nvidia-smi would wake a runtime-suspended dGPU.
+dgpu_driver_bound() {
+  local bdf
+  bdf="$(find_nvidia_gpu_bdf || true)"
+  [[ -n "$bdf" && -L "/sys/bus/pci/devices/$bdf/driver" ]] || return 1
+  [[ "$(basename "$(readlink "/sys/bus/pci/devices/$bdf/driver")")" == "nvidia" ]]
 }
 
 effective_gpu_class() {
@@ -470,7 +542,7 @@ effective_gpu_class() {
     return
   fi
 
-  if ! nvidia_userspace_ready; then
+  if ! dgpu_driver_bound; then
     echo "dgpu-pci-no-driver"
     return
   fi
@@ -479,6 +551,14 @@ effective_gpu_class() {
 }
 
 print_dgpu_repair_hint() {
+  if mode_is_integrated "$(supergfx_reported_mode)"; then
+    cat <<'EOF'
+hint: supergfxctl is in Integrated mode but the policy expects Hybrid.
+hint: switch once (requests Hybrid and logs out within the 30 s supergfxd window):
+  ~/.local/bin/g14-power-mode.sh apply --logout-on-pending yes
+EOF
+    return
+  fi
   cat <<'EOF'
 hint: dGPU device is missing from PCI tree while non-integrated mode is expected.
 hint: try in terminal:
@@ -491,7 +571,9 @@ expected_gpu_class_from_policy() {
   local ppd="$1"
   local source="$2"
 
-  if [[ "$ppd" == "performance" ]]; then
+  if [[ "$GPU_POLICY" == "hybrid-only" ]]; then
+    echo "hybrid"
+  elif [[ "$ppd" == "performance" ]]; then
     echo "hybrid"
   elif [[ "$source" == "dc" && "$ppd" == "power-saver" ]]; then
     echo "integrated"
@@ -507,7 +589,7 @@ is_gpu_consistent_with_expected() {
 
   case "$expected" in
     integrated)
-      [[ "$effective" == "integrated" ]]
+      [[ "$effective" == "integrated" ]] || dgpu_runtimepm_suspended
       ;;
     hybrid)
       [[ "$effective" == "dgpu" ]]
@@ -564,6 +646,11 @@ select_mode_from_supported() {
 set_gpu_mode() {
   local desired_class="$1"
   local logout_on_pending="$2"
+
+  if [[ "${G14_SKIP_GPU_MODE:-0}" == "1" ]]; then
+    log "Skipping GPU mode request (G14_SKIP_GPU_MODE=1)"
+    return
+  fi
 
   if ! has_cmd supergfxctl; then
     warn "supergfxctl not found; skipping GPU mode"
@@ -633,7 +720,7 @@ set_gpu_mode() {
 
   if ! is_gpu_consistent_with_expected "$desired_class"; then
     warn "GPU state not yet consistent with expected class '$desired_class' (reported=$(supergfx_reported_mode), effective=$(effective_gpu_class))"
-    if [[ "$desired_class" != "integrated" && "$(effective_gpu_class)" == "integrated" && ! dgpu_pci_present ]]; then
+    if [[ "$pending_action" == "none" && "$desired_class" != "integrated" && "$(effective_gpu_class)" == "integrated" ]] && ! dgpu_pci_present; then
       print_dgpu_repair_hint | while IFS= read -r line; do warn "$line"; done
     fi
   fi
@@ -666,30 +753,19 @@ apply_profile_mapping() {
 
   apply_cpu_policy "$ppd"
 
-  if [[ "$ppd" == "performance" ]]; then
-    set_asus_profile "Performance"
-    set_gpu_mode "hybrid" "$logout_on_pending"
-    apply_refresh_rate_policy "$source"
-    log "Applied mapping: ppd=performance source=$source"
-    return
-  fi
+  local gpu_class
+  gpu_class="$(expected_gpu_class_from_policy "$ppd" "$source")"
 
-  if [[ "$ppd" == "power-saver" ]]; then
-    set_asus_profile "Quiet"
-    if [[ "$source" == "dc" ]]; then
-      set_gpu_mode "integrated" "$logout_on_pending"
-    else
-      set_gpu_mode "hybrid" "$logout_on_pending"
-    fi
-    apply_refresh_rate_policy "$source"
-    log "Applied mapping: ppd=power-saver source=$source"
-    return
-  fi
+  case "$ppd" in
+    performance) set_asus_profile "Performance" ;;
+    power-saver) set_asus_profile "Quiet" ;;
+    *) set_asus_profile "Balanced" ;;
+  esac
 
-  set_asus_profile "Balanced"
-  set_gpu_mode "hybrid" "$logout_on_pending"
+  set_gpu_mode "$gpu_class" "$logout_on_pending"
+  enforce_dgpu_runtimepm_auto
   apply_refresh_rate_policy "$source"
-  log "Applied mapping: ppd=$ppd source=$source (balanced policy)"
+  log "Applied mapping: ppd=$ppd source=$source gpu_policy=$GPU_POLICY gpu_class=$gpu_class"
 }
 
 status() {
@@ -720,6 +796,7 @@ asus_profile=${profile:-unknown}
 ppd=${ppd:-unknown}
 gpu_mode_reported=$gfx
 gpu_mode_effective=$effective
+gpu_policy=$GPU_POLICY
 gpu_mode_expected=$expected
 gpu_mode_consistent=$consistent
 nvidia_gpu_bdf=${nvidia_bdf:-none}
@@ -770,6 +847,8 @@ Notes:
   - Ubuntu top-right menu (powerprofilesctl) is the mode selector.
   - AC/DC auto-apply is handled by the user systemd service running watch.
   - status/check rely on effective hardware state and cached requested mode.
+  - GPU policy: G14_GPU_POLICY or ~/.config/g14-power/gpu-policy = hybrid-only (default) | acdc.
+  - Every supergfxctl Integrated<->Hybrid change needs a logout within 30 s of the request.
 EOF
 }
 
@@ -805,7 +884,7 @@ case "$cmd" in
       echo "ok: gpu state consistent (expected=$expected reported=$(supergfx_reported_mode) effective=$(effective_gpu_class))"
     else
       echo "mismatch: expected=$expected reported=$(supergfx_reported_mode) effective=$(effective_gpu_class)"
-      if [[ "$expected" != "integrated" && "$(effective_gpu_class)" == "integrated" && ! dgpu_pci_present ]]; then
+      if [[ "$expected" != "integrated" && "$(effective_gpu_class)" == "integrated" ]] && ! dgpu_pci_present; then
         print_dgpu_repair_hint
       fi
       exit 2
