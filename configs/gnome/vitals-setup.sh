@@ -1,7 +1,14 @@
 #!/bin/bash
 # Configure GNOME Vitals extension for Zephyrus G14 telemetry
-# Sets panel sensors to: CPU %, GPU %, RAM %, Battery power (W)
+# Sets panel sensors to: CPU %, GPU % (if the power-safe wrapper is installed), RAM %, Battery power (W)
 # Fixes "Battery: no data" by selecting BAT1 (this laptop uses BAT1, not BAT0/BATT).
+#
+# GPU sensors are enabled only when the power-safe nvidia-smi wrapper is installed
+# (sudo bash configs/gnome/install-nvidia-smi-powersafe.sh). With the stock nvidia-smi, Vitals keeps an
+# `nvidia-smi -l 1` subprocess running for the whole session; that query every second never lets the
+# RTX 5070 Ti reach runtime D3, so in Hybrid mode the dGPU stays in D0 and costs ~8 W on battery
+# (measured 2026-09-21: 18-20 W idle with polling, 10 W without). The wrapper prints N/A while the dGPU
+# is asleep or unused and only queries the real nvidia-smi while a client (RL job, offloaded app) holds it.
 
 set -euo pipefail
 
@@ -54,33 +61,34 @@ else
     dconf write /org/gnome/shell/extensions/vitals/battery-slot "$battery_slot"
 fi
 
+WRAPPER="/usr/local/bin/nvidia-smi"
+gpu_enabled=false
+if [[ -x "$WRAPPER" ]] && grep -q "nvidia-smi-powersafe" "$WRAPPER"; then
+    gpu_enabled=true
+    log "Power-safe nvidia-smi wrapper found; enabling GPU sensors"
+    # Make Vitals render N/A (instead of the last value) for fields the wrapper reports as unavailable
+    if ! bash "$(dirname "${BASH_SOURCE[0]}")/vitals-na-patch.sh"; then
+        warn "Vitals N/A patch could not be applied; GPU % will read 0 while the dGPU sleeps"
+    fi
+else
+    warn "Power-safe nvidia-smi wrapper not installed; GPU sensors stay OFF (they would keep the dGPU awake)"
+    warn "Install it with: sudo bash $(dirname "${BASH_SOURCE[0]}")/install-nvidia-smi-powersafe.sh, then rerun this script"
+fi
+
 log "Enabling required sensor groups"
 dconf write /org/gnome/shell/extensions/vitals/show-processor true
-dconf write /org/gnome/shell/extensions/vitals/show-gpu true
+dconf write /org/gnome/shell/extensions/vitals/show-gpu "$gpu_enabled"
 dconf write /org/gnome/shell/extensions/vitals/show-memory true
 dconf write /org/gnome/shell/extensions/vitals/show-battery true
 
-log "Detecting GPU sensor key"
-gpu_hot_sensor="_gpu#1_utilization_"
-
-# If NVIDIA telemetry is available, Vitals uses nvidia-smi and indexes GPUs as gpu#1..N
-if command -v nvidia-smi >/dev/null && nvidia-smi -L >/dev/null 2>&1; then
-    gpu_hot_sensor="_gpu#1_utilization_"
+if [[ "$gpu_enabled" == "true" ]]; then
+    # Vitals indexes nvidia-smi GPUs as gpu#1..N
+    log "Setting panel hot sensors: CPU %, GPU %, RAM %, Battery power"
+    dconf write /org/gnome/shell/extensions/vitals/hot-sensors "['_processor_usage_', '_gpu#1_utilization_', '_memory_usage_', '_battery_power_rate_']"
 else
-    # Fallback to DRM gpu_busy_percent (typically AMD iGPU): key is _gpu#<card index>_usage_
-    gpu_busy_path=$(ls /sys/class/drm/card*/device/gpu_busy_percent 2>/dev/null | head -n1 || true)
-    if [[ -n "$gpu_busy_path" ]]; then
-        gpu_card=$(basename "$(dirname "$(dirname "$gpu_busy_path")")")
-        gpu_index=${gpu_card#card}
-        if [[ "$gpu_index" =~ ^[0-9]+$ ]]; then
-            gpu_hot_sensor="_gpu#${gpu_index}_usage_"
-        fi
-    fi
+    log "Setting panel hot sensors: CPU %, RAM %, Battery power"
+    dconf write /org/gnome/shell/extensions/vitals/hot-sensors "['_processor_usage_', '_memory_usage_', '_battery_power_rate_']"
 fi
-
-log "Using GPU sensor key: ${gpu_hot_sensor}"
-log "Setting panel hot sensors: CPU %, GPU %, RAM %, Battery power"
-dconf write /org/gnome/shell/extensions/vitals/hot-sensors "['_processor_usage_', '${gpu_hot_sensor}', '_memory_usage_', '_battery_battery_']"
 
 log "Reloading Vitals extension"
 gnome-extensions disable "$EXT_ID" || true
@@ -92,5 +100,11 @@ echo "  battery-slot : $(dconf read /org/gnome/shell/extensions/vitals/battery-s
 echo "  hot-sensors  : $(dconf read /org/gnome/shell/extensions/vitals/hot-sensors 2>/dev/null || echo unknown)"
 
 echo ""
-echo "If GPU usage stays near 0%, the NVIDIA dGPU may be idle in hybrid mode (normal)."
+if [[ "$gpu_enabled" == "true" ]]; then
+    echo "GPU % shows N/A while the dGPU is asleep or unused; values appear as soon as a job holds the GPU."
+    echo "If the N/A patch was applied just now, log out and back in once: GNOME Shell loads extension code per session."
+else
+    echo "GPU sensors are disabled: Vitals' stock nvidia-smi polling keeps the dGPU awake (~8 W on battery)."
+fi
+echo "Check dGPU sleep with: bash configs/power/g14-dgpu-sleep-check.sh"
 echo "Battery wattage sign is inferred from State (Charging/Discharging)."

@@ -1,0 +1,235 @@
+#!/usr/bin/env python3
+# nvidia-smi-powersafe: drop-in wrapper for nvidia-smi that never wakes a sleeping dGPU.
+#
+# Installed as /usr/local/bin/nvidia-smi (ahead of /usr/bin in PATH) so that monitoring tools such
+# as the GNOME Vitals extension, which run `nvidia-smi --query-gpu=... -l 1` for the whole session,
+# stop keeping the RTX 5070 Ti in D0 (measured: ~8 W on battery, and one nvidia-smi call keeps the
+# GPU awake for 20 s).
+#
+# Behaviour:
+#   * Any invocation without a loop flag (-l / --loop / -lms / --loop-ms) is passed straight to
+#     /usr/bin/nvidia-smi. Your terminal `nvidia-smi` is unchanged.
+#   * A looping --query-gpu invocation is emulated here. Every tick the wrapper reads the PCI
+#     runtime PM state of the dGPU from sysfs (no driver call):
+#       - device not on the bus (supergfxctl Integrated) .... prints an N/A line, never queries
+#       - runtime_status != active ......................... prints an N/A line, never queries (GPU asleep)
+#       - active ........................................... someone woke the GPU: a job, an offloaded app,
+#                                                              or the driver's own ~20 s idle tail after the
+#                                                              last access (including our own query).
+#     While active the real nvidia-smi runs, but rate-limited so the wrapper can never keep the GPU
+#     awake by itself: the first tick after a wake-up queries immediately; if utilization is above 0
+#     the GPU is busy and it is queried every tick; after IDLE_ZERO_TICKS consecutive 0 % samples it
+#     is queried at most every IDLE_QUERY_S seconds (longer than the 20 s tail), so the GPU can drop
+#     to D3 between checks. The runtime_usage counter is not used: it reads 1 both during a running
+#     job and during the idle tail (verified with a 32 % load).
+#     N/A lines never contain stale measurements: every field is "[N/A]" and the first (name) field
+#     carries a status word (asleep / idle / off). Stock Vitals drops non-numeric values and keeps
+#     showing the last number, so "[N/A]" would leave a stale percentage in the panel. The wrapper
+#     therefore checks once at start whether the local Vitals patch (vitals-na-patch.sh, marker
+#     "g14-vitals-na-patch" in sensors.js) is present: with the patch, utilization/clock/power fields
+#     are "[N/A]" and the panel reads N/A; without it they are "0" (true for a GPU in D3cold or without
+#     a client), which is the only non-stale value stock Vitals can display.
+#   * NVIDIA_SMI_POWERSAFE=0 in the environment disables the emulation (always pass through).
+#
+# Only the CSV --query-gpu form is emulated (what Vitals uses). Any other looping form passes through.
+
+import os
+import signal
+import subprocess
+import sys
+import time
+
+REAL = "/usr/bin/nvidia-smi"
+
+
+def passthrough(argv):
+    os.execv(REAL, [REAL] + argv)
+
+
+def parse_args(argv):
+    interval = None
+    query = None
+    rest = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("-l", "--loop", "-lms", "--loop-ms"):
+            if i + 1 < len(argv):
+                interval = (a, argv[i + 1])
+                i += 2
+                continue
+            interval = (a, "1")
+        elif a.startswith("--loop=") or a.startswith("--loop-ms="):
+            interval = tuple(a.split("=", 1))
+        elif a.startswith("--query-gpu="):
+            query = a.split("=", 1)[1]
+            rest.append(a)
+        elif a == "--query-gpu" and i + 1 < len(argv):
+            query = argv[i + 1]
+            rest.append(a)
+            rest.append(argv[i + 1])
+            i += 1
+        else:
+            rest.append(a)
+        i += 1
+    return interval, query, rest
+
+
+def interval_seconds(interval):
+    flag, value = interval
+    try:
+        v = float(value)
+    except ValueError:
+        v = 1.0
+    if flag in ("-lms", "--loop-ms"):
+        v = v / 1000.0
+    return max(v, 0.2)
+
+
+def find_dgpu():
+    base = "/sys/bus/pci/devices"
+    try:
+        for name in os.listdir(base):
+            dev = os.path.join(base, name)
+            try:
+                with open(os.path.join(dev, "vendor")) as f:
+                    if f.read().strip() != "0x10de":
+                        continue
+                with open(os.path.join(dev, "class")) as f:
+                    if not f.read().strip().startswith("0x03"):
+                        continue
+            except OSError:
+                continue
+            return dev
+    except OSError:
+        pass
+    return None
+
+
+def read(path, default=""):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except (OSError, ValueError):
+        return default
+
+
+IDLE_QUERY_S = 25.0      # while active but idle, query at most this often (driver idle tail is ~20 s)
+IDLE_ZERO_TICKS = 3      # consecutive 0 % samples before treating the GPU as idle
+
+
+def gpu_state():
+    """Returns off, asleep or active from sysfs only."""
+    dev = find_dgpu()
+    if dev is None:
+        return "off"
+    if read(os.path.join(dev, "power/runtime_status")) != "active":
+        return "asleep"
+    return "active"
+
+
+def util_from_line(query, line):
+    fields = [f.strip() for f in query.split(",") if f.strip()]
+    values = [v.strip() for v in line.split(",")]
+    for name, value in zip(fields, values):
+        if name == "utilization.gpu":
+            try:
+                return float(value)
+            except ValueError:
+                return None
+    return None
+
+
+ZERO_PREFIXES = ("utilization.", "clocks.", "power.draw")
+VITALS_PATCH_MARKER = "g14-vitals-na-patch"
+VITALS_SENSORS = (
+    os.path.expanduser("~/.local/share/gnome-shell/extensions/Vitals@CoreCoding.com/sensors.js"),
+    "/usr/share/gnome-shell/extensions/Vitals@CoreCoding.com/sensors.js",
+)
+
+
+def vitals_renders_na():
+    for path in VITALS_SENSORS:
+        try:
+            with open(path) as f:
+                return VITALS_PATCH_MARKER in f.read()
+        except OSError:
+            continue
+    return False
+
+
+def na_line(query, state, zeros):
+    fields = [f.strip() for f in query.split(",") if f.strip()]
+    if not fields:
+        fields = ["name"]
+    out = []
+    for idx, field in enumerate(fields):
+        if idx == 0 and field == "name":
+            out.append("NVIDIA dGPU (%s)" % state)
+        elif zeros and field.startswith(ZERO_PREFIXES):
+            out.append("0")
+        else:
+            out.append("[N/A]")
+    return ", ".join(out)
+
+
+def main():
+    argv = sys.argv[1:]
+    if os.environ.get("NVIDIA_SMI_POWERSAFE", "1") == "0":
+        passthrough(argv)
+
+    interval, query, rest = parse_args(argv)
+    if interval is None or query is None:
+        passthrough(argv)
+
+    period = interval_seconds(interval)
+    zeros = not vitals_renders_na()
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+
+    busy = False
+    zero_ticks = 0
+    last_query = None
+
+    while True:
+        started = time.monotonic()
+        state = gpu_state()
+        line = None
+        if state != "active":
+            busy = False
+            zero_ticks = 0
+            last_query = None
+        else:
+            may_query = busy or last_query is None or (started - last_query) >= IDLE_QUERY_S
+            if may_query:
+                last_query = started
+                try:
+                    res = subprocess.run([REAL] + rest, capture_output=True, text=True, timeout=10)
+                    if res.returncode == 0 and res.stdout.strip():
+                        line = res.stdout.rstrip("\n")
+                except (OSError, subprocess.TimeoutExpired):
+                    line = None
+                util = util_from_line(query, line) if line is not None else None
+                if util is not None and util > 0:
+                    busy = True
+                    zero_ticks = 0
+                else:
+                    zero_ticks += 1
+                    if zero_ticks >= IDLE_ZERO_TICKS:
+                        busy = False
+                if not busy and line is not None and zero_ticks >= IDLE_ZERO_TICKS:
+                    line = None  # idle: report N/A rather than a 0 % that keeps looking live
+            state = "busy" if busy else "idle"
+        if line is None:
+            line = na_line(query, state, zeros)
+        try:
+            sys.stdout.write(line + "\n")
+            sys.stdout.flush()
+        except (BrokenPipeError, OSError):
+            return
+        elapsed = time.monotonic() - started
+        time.sleep(max(period - elapsed, 0.05))
+
+
+if __name__ == "__main__":
+    main()
