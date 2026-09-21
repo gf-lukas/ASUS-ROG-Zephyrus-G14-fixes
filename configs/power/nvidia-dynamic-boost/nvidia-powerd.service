@@ -1,0 +1,12 @@
+# /etc/systemd/system/nvidia-powerd.service
+# Copied verbatim from /usr/share/doc/nvidia-kernel-common-580/nvidia-powerd.service.
+# Ubuntu ships the nvidia-powerd binary but installs this unit only as documentation.
+[Unit]
+Description=nvidia-powerd service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/nvidia-powerd
+
+[Install]
+WantedBy=multi-user.target
