@@ -28,9 +28,12 @@ fi
 
 log "Removing custom MT7925 workaround files"
 rm -f /etc/modprobe.d/mt7925-fix.conf
+rm -f /etc/modprobe.d/mt7925e-aspm-off.conf
 rm -f /etc/udev/rules.d/99-mt7925-aspm.rules
+rm -f /etc/udev/rules.d/80-mt7925e-runtime-pm-off.rules
 rm -f /usr/lib/systemd/system-sleep/mt7925-reload.sh
 rm -f /etc/NetworkManager/conf.d/wifi-powersave-off.conf
+rm -rf /lib/firmware/updates/mediatek/mt7925   # firmware override (kernel prefers it over the package)
 
 log "Refreshing module/initramfs state"
 depmod -a || true
