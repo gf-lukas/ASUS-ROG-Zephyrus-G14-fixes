@@ -11,8 +11,8 @@
 # microphone. See the header of that file for details.
 #
 # Also installs wireplumber/51-g14-bluez.lua (bluetooth.lua.d drop-in) which
-# uses HSP instead of HFP for the headset microphone: on the MT7925 adapter
-# the HFP audio link fails most of the time, see the header of that file.
+# disables mSBC: on the MT7925 adapter an mSBC audio link comes up empty and
+# blocks every later one, see the header of that file.
 #
 # Usage (as desktop user, no root):
 #   bash configs/bluetooth/install-bt-headset-autoswitch.sh           # install + restart WirePlumber
@@ -60,10 +60,10 @@ check() {
         echo "Override installed   : no"
     fi
     if [ -f "$DEST_BT" ]; then
-        if cmp -s "$SRC_BT" "$DEST_BT"; then echo "HSP drop-in          : yes ($DEST_BT, matches repo)"
-        else echo "HSP drop-in          : yes ($DEST_BT, DIFFERS from repo copy)"; fi
+        if cmp -s "$SRC_BT" "$DEST_BT"; then echo "mSBC-off drop-in     : yes ($DEST_BT, matches repo)"
+        else echo "mSBC-off drop-in     : yes ($DEST_BT, DIFFERS from repo copy)"; fi
     else
-        echo "HSP drop-in          : no"
+        echo "mSBC-off drop-in     : no"
     fi
     echo "Stock script sha256 : $( [ -r "$STOCK" ] && sha256sum "$STOCK" | cut -d' ' -f1 || echo n/a ) (expected $STOCK_SHA)"
     echo "Saved headset profile: $(grep -E '^saved-headset-profile' "$STATE" 2>/dev/null || echo '(none)')"
@@ -99,7 +99,7 @@ case "${1:-}" in
         install -D -m 0644 "$SRC" "$DEST"
         echo "Installed $DEST"
         install -D -m 0644 "$SRC_BT" "$DEST_BT"
-        echo "Installed $DEST_BT (HSP instead of HFP for the microphone)"
+        echo "Installed $DEST_BT (mSBC disabled, calls use CVSD)"
         # Drop a remembered mic-less "headset profile" so the first call works,
         # and a remembered mSBC profile that no longer exists with mSBC off.
         if grep -qE '^saved-headset-profile:.*=(a2dp-|headset-head-unit-msbc$)' "$STATE" 2>/dev/null; then
@@ -109,7 +109,7 @@ case "${1:-}" in
         fi
         restart_wp
         echo
-        echo "Done. Disconnect and reconnect the headset once so BlueZ connects HSP."
+        echo "Done. Disconnect and reconnect the headset once so the profile list is rebuilt."
         echo "Select the headset as INPUT device once (GNOME Settings > Sound > Input);"
         echo "calls in Firefox/Chrome/Teams then switch it to the headset profile automatically,"
         echo "regardless of which output device is selected." ;;

@@ -13,6 +13,7 @@
 #   bash configs/bluetooth/bt-headset-mic-test.sh            # 6 attempts with the installed profile (HSP or HFP)
 #   bash configs/bluetooth/bt-headset-mic-test.sh -n 10      # more attempts
 #   bash configs/bluetooth/bt-headset-mic-test.sh --hfp      # temporarily force HFP (+mSBC) for the test
+#   bash configs/bluetooth/bt-headset-mic-test.sh --hfp-cvsd # temporarily force HFP without mSBC
 #   bash configs/bluetooth/bt-headset-mic-test.sh --hsp      # temporarily force HSP for the test
 #
 # --hfp/--hsp drop a temporary bluetooth.lua.d file, restart WirePlumber and
@@ -26,9 +27,9 @@ MODE=""
 while [ $# -gt 0 ]; do
     case "$1" in
         -n) N="$2"; shift 2 ;;
-        --hfp|--hsp) MODE="${1#--}"; shift ;;
+        --hfp|--hfp-cvsd|--hsp) MODE="${1#--}"; shift ;;
         -h|--help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-        *) echo "Usage: $0 [-n attempts] [--hfp|--hsp]" >&2; exit 2 ;;
+        *) echo "Usage: $0 [-n attempts] [--hfp|--hfp-cvsd|--hsp]" >&2; exit 2 ;;
     esac
 done
 
@@ -97,6 +98,10 @@ if [ -n "$MODE" ]; then
         printf '%s\n' '-- temporary, written by bt-headset-mic-test.sh' \
             'bluez_monitor.properties["bluez5.roles"] = "[ a2dp_sink a2dp_source hfp_ag ]"' \
             'bluez_monitor.properties["bluez5.enable-msbc"] = true' > "$TMP_CONF"
+    elif [ "$MODE" = hfp-cvsd ]; then
+        printf '%s\n' '-- temporary, written by bt-headset-mic-test.sh' \
+            'bluez_monitor.properties["bluez5.roles"] = "[ a2dp_sink a2dp_source hfp_ag ]"' \
+            'bluez_monitor.properties["bluez5.enable-msbc"] = false' > "$TMP_CONF"
     else
         printf '%s\n' '-- temporary, written by bt-headset-mic-test.sh' \
             'bluez_monitor.properties["bluez5.roles"] = "[ a2dp_sink a2dp_source hsp_ag ]"' > "$TMP_CONF"
