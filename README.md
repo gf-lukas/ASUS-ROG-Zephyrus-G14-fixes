@@ -31,7 +31,7 @@ Highlights, if you only came for one thing:
 - [configs/mt76-pm-fix/apply-mt7925-upstream-firmware.sh](configs/mt76-pm-fix/apply-mt7925-upstream-firmware.sh): Pins MT7925 Wi-Fi + Bluetooth firmware to a checksum-verified upstream `linux-firmware` tag as an override (preferred first fix path); `--check` compares loaded / packaged / override builds, `--revert` removes the override.
 - [configs/mt76-pm-fix/apply-mt7925-aspm-off.sh](configs/mt76-pm-fix/apply-mt7925-aspm-off.sh): Applies persistent MT7925 power-management hardening (`disable_aspm=Y`, NM powersave off, runtime PM off).
 - [configs/mt76-pm-fix/recover-wifi.sh](configs/mt76-pm-fix/recover-wifi.sh): Fast WiFi recovery helper (`reconnect` or `full reload`).
-- [configs/bluetooth/install-bt-headset-autoswitch.sh](configs/bluetooth/install-bt-headset-autoswitch.sh): WirePlumber 0.4 override so a Bluetooth headset switches to its microphone (HSP/HFP) profile for calls even when HDMI/speakers are the default output; `--check` / `--revert`.
+- [configs/bluetooth/install-bt-headset-autoswitch.sh](configs/bluetooth/install-bt-headset-autoswitch.sh): WirePlumber 0.4 override so a Bluetooth headset switches to its microphone (HSP/HFP) profile for calls even when HDMI/speakers are the default output, plus a drop-in that uses HSP instead of HFP for the microphone (HFP's audio link fails most of the time on the MT7925 with the Legend 50); `--check` / `--revert`.
 - [configs/bluetooth/import-bt-linkkey.sh](configs/bluetooth/import-bt-linkkey.sh): Writes the Windows-negotiated Bluetooth link key into BlueZ so a headset stays paired in both OSes (dual boot).
 - [configs/power/g14-power-mode.sh](configs/power/g14-power-mode.sh): Maps Ubuntu power profile + AC/DC to ASUS profile and GPU policy.
 - [configs/power/g14-set-refresh.py](configs/power/g14-set-refresh.py): Applies monitor refresh changes via GNOME Mutter DisplayConfig.
@@ -281,6 +281,44 @@ while a Communication-role stream (Firefox, Chrome, Teams, Zoom) is open and ret
 Trap to know: the HFP microphone route keeps its own volume. If the headset switches but stays silent, check the input
 level in GNOME Sound settings while a call is running (it was saved as 0 once here). The override is for WirePlumber
 0.4.x only; the installer refuses on 0.5+, whose policy is not Lua.
+
+### Headset switches to HFP but the microphone delivers silence (MT7925 + Legend 50)
+
+Seen with the Poly Voyager Legend 50 on kernel 7.0 with BT firmware 20260813: the profile switch works, the headset
+appears as microphone in the browser, but the SCO audio link does not come up. `journalctl --user -u wireplumber`
+shows `Failure in Bluetooth audio transport`, and with `WIREPLUMBER_DEBUG=5,spa.bluez5*` the transport reports
+`acquire failed: Operation not supported`. Measured with a Communication-role test stream: HFP failed in 5 of 7
+attempts, with CVSD as well as mSBC, independent of the pause between attempts; HSP succeeded in 10 of 10.
+
+The installer therefore drops [configs/bluetooth/wireplumber/51-g14-bluez.lua](configs/bluetooth/wireplumber/51-g14-bluez.lua)
+into `~/.config/wireplumber/bluetooth.lua.d/`, which sets `bluez5.roles = [ a2dp_sink a2dp_source hsp_ag ]`: the headset
+microphone profile is HSP instead of HFP (no codec negotiation, the PC opens the audio link). Both are narrowband CVSD on
+this adapter anyway; HFP extras (wideband mSBC, battery over HFP) are lost, battery still comes over BLE. Disconnect and
+reconnect the headset once after installing so BlueZ connects the HSP profile. Quick test without a call app:
+
+```bash
+timeout 8 pw-record -P '{ media.role = "Communication" }' /tmp/mic.wav   # headset must switch to "Headset Head Unit" and back
+```
+
+The kernel lines `ACL/SCO packet for unknown connection handle` appear on every SCO session with this firmware, successful
+ones included; they are not the failure signature. Whether the HFP failures come from the pinned BT firmware or kernel
+7.0 is open; a `sudo btmon` capture during a failing attempt, or a boot into the 6.17 fallback kernel, would tell.
+
+### Headset "connected" in Bluetooth settings but missing from Sound devices
+
+Dual-mode headsets (Poly Voyager Legend 50 and similar) keep a Bluetooth LE link for their companion app and battery
+service. After the headset drops the classic link (multipoint hand-over to a phone, standby, `Host is down` in
+`journalctl -u bluetooth`) BlueZ still reports it as connected, but without A2DP/HFP transports there is no PipeWire
+card. Re-connect the audio profiles:
+
+```bash
+bluetoothctl connect <headset MAC>      # or power-cycle the headset
+```
+
+Swapping to a new headset: the override keys everything by device address, so no file changes are needed. Select the new
+headset once as input device (or `pw-metadata 0 default.configured.audio.source '{ "name": "bluez_input.<MAC with _>.0" }' Spa:String:JSON`)
+and check with `install-bt-headset-autoswitch.sh --check` that "Configured default source" names the new card. The
+dual-boot link key import below has to be repeated for the new headset.
 
 ### Re-pairing needed after every Windows boot (dual boot)
 

@@ -1,0 +1,15 @@
+-- G14-fixes: WirePlumber 0.4 Bluetooth monitor tweaks for the MT7925 adapter.
+-- Installed to ~/.config/wireplumber/bluetooth.lua.d/ next to the stock
+-- 50-bluez-config.lua (which this file amends, not replaces).
+--
+-- Use HSP (hsp_ag) instead of HFP (hfp_ag) for the headset microphone.
+-- On the MediaTek MT7925 (USB 13d3:3602, BT firmware 20260813, kernel 7.0)
+-- with the Poly Voyager Legend 50 the HFP SCO link setup failed in 5 of 7
+-- attempts ("Failure in Bluetooth audio transport", acquire -EOPNOTSUPP),
+-- with CVSD as well as mSBC, so most calls started with a dead microphone.
+-- HSP skips HFP codec negotiation and the PC opens the audio link directly;
+-- it came up 6 of 6 times in the same test. Both are narrowband CVSD here.
+-- Trade-off: no wideband (mSBC) audio, and no HFP extras such as battery
+-- level over HFP (BlueZ still reads it over the BLE battery service).
+-- Test: timeout 8 pw-record -P '{ media.role = "Communication" }' /tmp/mic.wav
+bluez_monitor.properties["bluez5.roles"] = "[ a2dp_sink a2dp_source hsp_ag ]"
