@@ -283,29 +283,29 @@ Trap to know: the HFP microphone route keeps its own volume. If the headset swit
 level in GNOME Sound settings while a call is running (it was saved as 0 once here). The override is for WirePlumber
 0.4.x only; the installer refuses on 0.5+, whose policy is not Lua.
 
-### Headset switches to HFP but the microphone delivers silence (mSBC on MT7925)
+### Calls silent after the headset switches to HFP (mSBC link not released, MT7925)
 
-Seen with the Poly Voyager Legend 50 on kernel 7.0 (BT firmware 20260813 and 20260605 alike): the profile switch
-works, the headset appears as microphone in the browser, but the audio link carries nothing. `journalctl --user -u
-wireplumber` shows `Failure in Bluetooth audio transport`. An HCI trace (`sudo btmon | tee /tmp/bt.txt`, the `-w`
-option crashes in Ubuntu's bluez 5.72) shows the mechanism, see
-[diagnostics/bt-msbc-esco-mt7925-2026-10-02.md](diagnostics/bt-msbc-esco-mt7925-2026-10-02.md): the mSBC call sets up
-its transparent eSCO link successfully, the link then carries no SCO data and is never disconnected, and every later
+Seen with the Poly Voyager Legend 50 on kernel 7.0 (BT firmware 20260813 and 20260605 alike). An HCI trace
+(`sudo btmon | tee /tmp/bt.txt`; the `-w` option crashes in Ubuntu's bluez 5.72) shows the mechanism, see
+[diagnostics/bt-msbc-esco-mt7925-2026-10-02.md](diagnostics/bt-msbc-esco-mt7925-2026-10-02.md): the mSBC eSCO link is
+set up fine and carries wideband audio, but when PipeWire releases it the kernel never disconnects it, and every later
 SCO setup to the headset is refused with `Unsupported LMP Parameter Value (0x20)` until the headset's ACL link drops.
-That is why one call after a reconnect sometimes worked and the next ones never did.
+So the first call after a reconnect works and the next ones are silent, which is exactly what automatic profile
+switching at call start produces.
 
-The installer therefore drops [configs/bluetooth/wireplumber/51-g14-bluez.lua](configs/bluetooth/wireplumber/51-g14-bluez.lua)
-into `~/.config/wireplumber/bluetooth.lua.d/`, which sets `bluez5.enable-msbc = false`. HFP then negotiates CVSD:
-narrowband telephone quality, but the link comes up every time and is torn down cleanly (HFP+CVSD 8 of 8, HSP 13 of 14,
-HFP+mSBC 1 of 22 in the tests here). Disconnect and reconnect the headset once after installing. Measure it yourself:
+What works: switch the headset to **Headset Head Unit (HSP/HFP, codec mSBC)** manually in GNOME Settings > Sound
+(output device Poly, profile dropdown) and leave it there while you take calls. The link is set up once and stays, with
+wideband quality both ways. Switch back to A2DP for music; if a later switch to the headset profile ends in silence,
+disconnect and reconnect the headset once. Do not run the autoswitch override from the previous section with this
+headset; its switch-and-release per call is the failing path. Measure with:
 
 ```bash
-bash configs/bluetooth/bt-headset-mic-test.sh -n 8          # installed setup; --hfp / --hfp-cvsd / --hsp force a mode
+bash configs/bluetooth/bt-headset-mic-test.sh -n 8          # --hfp / --hfp-cvsd / --hsp force a mode for the test
 ```
 
-Wideband calls over Bluetooth need the mSBC data path fixed in the kernel's btusb/MediaTek handling or in PipeWire;
-until then a USB audio dongle (Poly BT700) is the only wideband route. The kernel lines `SCO packet for unknown
-connection handle` are late packets after a teardown and harmless.
+The optional drop-in [configs/bluetooth/wireplumber/51-g14-bluez.lua](configs/bluetooth/wireplumber/51-g14-bluez.lua)
+disables mSBC so that automatic switching works again, at narrowband CVSD quality (8 of 8 here). The kernel lines
+`SCO packet for unknown connection handle` are late packets after a teardown and harmless.
 
 ### Headset "connected" in Bluetooth settings but missing from Sound devices
 
