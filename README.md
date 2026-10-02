@@ -32,6 +32,7 @@ Highlights, if you only came for one thing:
 - [configs/mt76-pm-fix/apply-mt7925-aspm-off.sh](configs/mt76-pm-fix/apply-mt7925-aspm-off.sh): Applies persistent MT7925 power-management hardening (`disable_aspm=Y`, NM powersave off, runtime PM off).
 - [configs/mt76-pm-fix/recover-wifi.sh](configs/mt76-pm-fix/recover-wifi.sh): Fast WiFi recovery helper (`reconnect` or `full reload`).
 - [configs/bluetooth/install-bt-headset-autoswitch.sh](configs/bluetooth/install-bt-headset-autoswitch.sh): WirePlumber 0.4 override so a Bluetooth headset switches to its microphone (HSP/HFP) profile for calls even when HDMI/speakers are the default output, plus a drop-in that uses HSP instead of HFP for the microphone (HFP's audio link fails most of the time on the MT7925 with the Legend 50); `--check` / `--revert`.
+- [configs/bluetooth/bt-headset-mic-test.sh](configs/bluetooth/bt-headset-mic-test.sh): Measures how often the headset microphone link comes up the way a call app triggers it; `--hfp` / `--hsp` force a profile for the test and undo it afterwards. Use it to compare kernel or firmware changes.
 - [configs/bluetooth/import-bt-linkkey.sh](configs/bluetooth/import-bt-linkkey.sh): Writes the Windows-negotiated Bluetooth link key into BlueZ so a headset stays paired in both OSes (dual boot).
 - [configs/power/g14-power-mode.sh](configs/power/g14-power-mode.sh): Maps Ubuntu power profile + AC/DC to ASUS profile and GPU policy.
 - [configs/power/g14-set-refresh.py](configs/power/g14-set-refresh.py): Applies monitor refresh changes via GNOME Mutter DisplayConfig.
@@ -288,7 +289,8 @@ Seen with the Poly Voyager Legend 50 on kernel 7.0 with BT firmware 20260813: th
 appears as microphone in the browser, but the SCO audio link does not come up. `journalctl --user -u wireplumber`
 shows `Failure in Bluetooth audio transport`, and with `WIREPLUMBER_DEBUG=5,spa.bluez5*` the transport reports
 `acquire failed: Operation not supported`. Measured with a Communication-role test stream: HFP failed in 5 of 7
-attempts, with CVSD as well as mSBC, independent of the pause between attempts; HSP succeeded in 10 of 10.
+attempts, with CVSD as well as mSBC, independent of the pause between attempts; HSP succeeded in 12 of 13
+(`bt-headset-mic-test.sh --hfp` / `--hsp` reproduces this).
 
 The installer therefore drops [configs/bluetooth/wireplumber/51-g14-bluez.lua](configs/bluetooth/wireplumber/51-g14-bluez.lua)
 into `~/.config/wireplumber/bluetooth.lua.d/`, which sets `bluez5.roles = [ a2dp_sink a2dp_source hsp_ag ]`: the headset
