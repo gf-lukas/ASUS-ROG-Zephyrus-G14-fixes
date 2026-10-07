@@ -1,0 +1,60 @@
+From: abrus861 <abrus861@users.noreply.github.com>
+Date: Sun, 4 Oct 2026 01:33:15 +0300
+Subject: [PATCH] bluez5: backend-native: keep the transport when AT+BCS
+ confirms the current codec
+
+Backport to PipeWire 1.0.5 (Ubuntu 24.04) of the fix proposed in
+https://gitlab.freedesktop.org/pipewire/pipewire/-/issues/5506 and shipped in
+https://github.com/abrus861/pipewire-hfp-atbcc-fix (patches/0003, written for
+1.6.x). 1.0.5 frees and re-creates the transport inline instead of calling
+rfcomm_new_transport(), otherwise the logic is identical.
+
+Some headsets (HUAWEI FreeClip/FreeBuds Pro 5, Poly Voyager Legend 50) send
+AT+BCC on every audio connection after the first one, shortly after the AG
+has started the eSCO connect. The AG answers +BCS:<current codec>, the headset
+confirms with AT+BCS=<same codec>, and the handler then (a) frees and
+re-creates the transport and (b) emits codec_switched, which makes the device
+remove and re-create its nodes. Both close the SCO socket while its connect
+is still in progress.
+
+The kernel answers the close with Create Connection Cancel, which does not
+cancel an eSCO setup; the controller completes the link anyway and the host
+has no connection for it. The link is now orphaned ("SCO packet for unknown
+connection handle") and every later Setup Synchronous Connection to the
+headset is refused (0x20 "Unsupported LMP Parameter Value" on MediaTek
+MT7925, 0x0a "Synchronous Connection Limit to a Device Exceeded" on Intel)
+until the ACL link is reconnected.
+
+If the confirmed codec is the one already in use and a transport exists,
+there is nothing to switch: reply OK and keep the transport and the nodes.
+---
+ spa/plugins/bluez5/backend-native.c | 16 ++++++++++++++--
+ 1 file changed, 14 insertions(+), 2 deletions(-)
+
+--- a/spa/plugins/bluez5/backend-native.c
++++ b/spa/plugins/bluez5/backend-native.c
+@@ -911,10 +911,22 @@ static bool rfcomm_hfp_ag(struct rfcomm *rfcomm, char* buf)
+ 			return true;
+ 		}
+ 
+-		rfcomm->codec = selected_codec;
+-
+ 		spa_log_debug(backend->log, "RFCOMM selected_codec = %i", selected_codec);
+ 
++		if (rfcomm->transport != NULL && rfcomm->codec == selected_codec) {
++			/* The headset re-confirmed the codec that is already in use (some headsets send
++			 * AT+BCC on every audio connection).  Keep the transport: freeing it here would
++			 * close a SCO socket whose connection may still be in progress, which leaves an
++			 * orphaned eSCO link in the controller and breaks all later SCO setups.
++			 * For the same reason no codec_switched event is emitted: the device would
++			 * remove and re-create its nodes, releasing the transport mid-connect. */
++			spa_log_debug(backend->log, "RFCOMM codec unchanged, keeping transport");
++			rfcomm_send_reply(rfcomm, "OK");
++			return true;
++		}
++
++		rfcomm->codec = selected_codec;
++
+ 		/* Recreate transport, since previous connection may now be invalid */
+ 		if (rfcomm->transport)
+ 			spa_bt_transport_free(rfcomm->transport);

@@ -15,6 +15,7 @@ Highlights, if you only came for one thing:
 - **dGPU never sleeps in Hybrid mode, 8 W extra on battery**: a GPU monitor polling `nvidia-smi`, see step 4 and
   "GPU switching".
 - **Wi-Fi drops / rate collapse with MT7925**: firmware pin first, ASPM off second, see Troubleshooting.
+- **Bluetooth headset mic works once, then silent in every call**: PipeWire bug, patched plugin in the Bluetooth section.
 - **Bluetooth headset mic missing in calls, re-pairing after every Windows boot**: see the Bluetooth section.
 
 ## What this repository includes
@@ -31,7 +32,8 @@ Highlights, if you only came for one thing:
 - [configs/mt76-pm-fix/apply-mt7925-upstream-firmware.sh](configs/mt76-pm-fix/apply-mt7925-upstream-firmware.sh): Pins MT7925 Wi-Fi + Bluetooth firmware to a checksum-verified upstream `linux-firmware` tag as an override (preferred first fix path); `--check` compares loaded / packaged / override builds, `--revert` removes the override.
 - [configs/mt76-pm-fix/apply-mt7925-aspm-off.sh](configs/mt76-pm-fix/apply-mt7925-aspm-off.sh): Applies persistent MT7925 power-management hardening (`disable_aspm=Y`, NM powersave off, runtime PM off).
 - [configs/mt76-pm-fix/recover-wifi.sh](configs/mt76-pm-fix/recover-wifi.sh): Fast WiFi recovery helper (`reconnect` or `full reload`).
-- [configs/bluetooth/install-bt-headset-autoswitch.sh](configs/bluetooth/install-bt-headset-autoswitch.sh): WirePlumber 0.4 override so a Bluetooth headset switches to its microphone (HSP/HFP) profile for calls even when HDMI/speakers are the default output, plus a drop-in that disables mSBC (an mSBC link on the MT7925 with the Legend 50 comes up empty and blocks all later ones); `--check` / `--revert`.
+- [configs/bluetooth/install-bt-headset-autoswitch.sh](configs/bluetooth/install-bt-headset-autoswitch.sh): WirePlumber 0.4 override so a Bluetooth headset switches to its microphone (HSP/HFP) profile for calls even when HDMI/speakers are the default output, plus an optional drop-in that disables mSBC (only a stopgap for the PipeWire bug below when the plugin cannot be patched); `--check` / `--revert`.
+- [configs/bluetooth/install-spa-bluez5-fix.sh](configs/bluetooth/install-spa-bluez5-fix.sh) + [pipewire-hfp-atbcc-fix/](configs/bluetooth/pipewire-hfp-atbcc-fix/): Builds PipeWire's Bluetooth plugin for the installed PipeWire version with the fix for the HFP "microphone works once per connection" bug (PipeWire issue #5506) and makes WirePlumber load it, user-local with a version guard; `--check` / `--revert`.
 - [configs/bluetooth/bt-headset-mic-test.sh](configs/bluetooth/bt-headset-mic-test.sh): Measures how often the headset microphone link comes up the way a call app triggers it; `--hfp` / `--hfp-cvsd` / `--hsp` force a mode for the test and undo it afterwards. Use it to compare kernel or firmware changes.
 - [configs/bluetooth/import-bt-linkkey.sh](configs/bluetooth/import-bt-linkkey.sh): Writes the Windows-negotiated Bluetooth link key into BlueZ so a headset stays paired in both OSes (dual boot).
 - [configs/power/g14-power-mode.sh](configs/power/g14-power-mode.sh): Maps Ubuntu power profile + AC/DC to ASUS profile and GPU policy.
@@ -283,29 +285,41 @@ Trap to know: the HFP microphone route keeps its own volume. If the headset swit
 level in GNOME Sound settings while a call is running (it was saved as 0 once here). The override is for WirePlumber
 0.4.x only; the installer refuses on 0.5+, whose policy is not Lua.
 
-### Calls silent after the headset switches to HFP (mSBC link not released, MT7925)
+### Headset microphone works once per connection, then every call is silent (PipeWire HFP bug)
 
-Seen with the Poly Voyager Legend 50 on kernel 7.0 (BT firmware 20260813 and 20260605 alike). An HCI trace
-(`sudo btmon | tee /tmp/bt.txt`; the `-w` option crashes in Ubuntu's bluez 5.72) shows the mechanism, see
-[diagnostics/bt-msbc-esco-mt7925-2026-10-02.md](diagnostics/bt-msbc-esco-mt7925-2026-10-02.md): the mSBC eSCO link is
-set up fine and carries wideband audio, but when PipeWire releases it the kernel never disconnects it, and every later
-SCO setup to the headset is refused with `Unsupported LMP Parameter Value (0x20)` until the headset's ACL link drops.
-So the first call after a reconnect works and the next ones are silent, which is exactly what automatic profile
-switching at call start produces.
+Seen with the Poly Voyager Legend 50 on kernel 7.0, BT firmware 20260813 and 20260605 alike: the first call after
+a headset reconnect works, every later one has no audio on the headset. `journalctl --user -u wireplumber` shows
+`Failure in Bluetooth audio transport`. This is PipeWire issue
+[#5506](https://gitlab.freedesktop.org/pipewire/pipewire/-/issues/5506), present in every release up to at least 1.6.9,
+so neither a newer kernel nor Ubuntu 26.04 (PipeWire 1.6.2) changes it. Mechanism, confirmed with an HCI trace here
+([diagnostics/bt-msbc-esco-mt7925-2026-10-02.md](diagnostics/bt-msbc-esco-mt7925-2026-10-02.md)): the headset sends
+`AT+BCC` while the PC is already setting up the call-audio (eSCO) link, PipeWire re-confirms the codec and then frees
+the transport, closing the SCO socket mid-connect. The controller completes the link anyway, nobody owns it, and every
+later SCO setup to that headset is refused (`Unsupported LMP Parameter Value (0x20)` on the MT7925) until the headset
+reconnects.
 
-What works: switch the headset to **Headset Head Unit (HSP/HFP, codec mSBC)** manually in GNOME Settings > Sound
-(output device Poly, profile dropdown) and leave it there while you take calls. The link is set up once and stays, with
-wideband quality both ways. Switch back to A2DP for music; if a later switch to the headset profile ends in silence,
-disconnect and reconnect the headset once. Do not run the autoswitch override from the previous section with this
-headset; its switch-and-release per call is the failing path. Measure with:
+Fix: a 14-line patch to PipeWire's native HFP backend (keep the transport when the headset confirms the codec already in
+use), backported here to Ubuntu 24.04's PipeWire 1.0.5 from
+[abrus861/pipewire-hfp-atbcc-fix](https://github.com/abrus861/pipewire-hfp-atbcc-fix). The installer builds only
+`libspa-bluez5.so` from the upstream 1.0.5 tarball (checksum-pinned; Ubuntu's patches do not touch this plugin) and
+installs it under `~/.local/lib/spa-0.2-patched/`, with a WirePlumber systemd drop-in that puts that directory first.
+A small chooser runs before every WirePlumber start and only selects a build matching the installed PipeWire version,
+otherwise it falls back to the system plugin and logs a warning; `apt dist-upgrade` cannot load a mismatched library,
+and after a PipeWire upgrade `--check` tells you to rebuild.
 
 ```bash
-bash configs/bluetooth/bt-headset-mic-test.sh -n 8          # --hfp / --hfp-cvsd / --hsp force a mode for the test
+sudo apt install meson libsbc-dev libbluetooth-dev libusb-1.0-0-dev libsystemd-dev   # build deps, once
+bash configs/bluetooth/install-spa-bluez5-fix.sh            # build, install, restart WirePlumber; reconnect the headset
+bash configs/bluetooth/install-spa-bluez5-fix.sh --check    # must say "WirePlumber has loaded : PATCHED libspa-bluez5.so"
+bash configs/bluetooth/bt-headset-mic-test.sh -n 8          # call-path test; --hfp / --hfp-cvsd / --hsp force a mode
 ```
 
-The optional drop-in [configs/bluetooth/wireplumber/51-g14-bluez.lua](configs/bluetooth/wireplumber/51-g14-bluez.lua)
-disables mSBC so that automatic switching works again, at narrowband CVSD quality (8 of 8 here). The kernel lines
-`SCO packet for unknown connection handle` are late packets after a teardown and harmless.
+Result here: mSBC (wideband) calls 8 of 8 with the patch, 1 of 22 without. The headset must be the selected output
+device for stock WirePlumber to switch it into the call profile; with HDMI as output you also need the autoswitch
+override from the previous section, which works again once the plugin is patched. The mSBC-off drop-in
+(`51-g14-bluez.lua`) is no longer needed. Without the patch the only ways out are reconnecting the headset before
+each call, holding the headset profile manually and reconnecting when it goes silent, or a USB audio dongle.
+The kernel lines `SCO packet for unknown connection handle` are late packets after a teardown and harmless.
 
 ### Headset "connected" in Bluetooth settings but missing from Sound devices
 
