@@ -32,7 +32,7 @@ Highlights, if you only came for one thing:
 - [configs/mt76-pm-fix/apply-mt7925-upstream-firmware.sh](configs/mt76-pm-fix/apply-mt7925-upstream-firmware.sh): Pins MT7925 Wi-Fi + Bluetooth firmware to a checksum-verified upstream `linux-firmware` tag as an override (preferred first fix path); `--check` compares loaded / packaged / override builds, `--revert` removes the override.
 - [configs/mt76-pm-fix/apply-mt7925-aspm-off.sh](configs/mt76-pm-fix/apply-mt7925-aspm-off.sh): Applies persistent MT7925 power-management hardening (`disable_aspm=Y`, NM powersave off, runtime PM off).
 - [configs/mt76-pm-fix/recover-wifi.sh](configs/mt76-pm-fix/recover-wifi.sh): Fast WiFi recovery helper (`reconnect` or `full reload`).
-- [configs/bluetooth/install-bt-headset-autoswitch.sh](configs/bluetooth/install-bt-headset-autoswitch.sh): WirePlumber 0.4 override so a Bluetooth headset switches to its microphone (HSP/HFP) profile for calls even when HDMI/speakers are the default output, plus an optional drop-in that disables mSBC (only a stopgap for the PipeWire bug below when the plugin cannot be patched); `--check` / `--revert`.
+- [configs/bluetooth/install-bt-headset-autoswitch.sh](configs/bluetooth/install-bt-headset-autoswitch.sh): WirePlumber 0.4 override so a Bluetooth headset switches to its microphone (HSP/HFP) profile for calls even when HDMI/speakers are the default output, `--check` / `--revert`. Needs the PipeWire plugin fix below to work with headsets that send AT+BCC.
 - [configs/bluetooth/install-spa-bluez5-fix.sh](configs/bluetooth/install-spa-bluez5-fix.sh) + [pipewire-hfp-atbcc-fix/](configs/bluetooth/pipewire-hfp-atbcc-fix/): Builds PipeWire's Bluetooth plugin for the installed PipeWire version with the fix for the HFP "microphone works once per connection" bug (PipeWire issue #5506) and makes WirePlumber load it, user-local with a version guard; `--check` / `--revert`.
 - [configs/bluetooth/bt-headset-mic-test.sh](configs/bluetooth/bt-headset-mic-test.sh): Measures how often the headset microphone link comes up the way a call app triggers it; `--hfp` / `--hfp-cvsd` / `--hsp` force a mode for the test and undo it afterwards. Use it to compare kernel or firmware changes.
 - [configs/bluetooth/import-bt-linkkey.sh](configs/bluetooth/import-bt-linkkey.sh): Writes the Windows-negotiated Bluetooth link key into BlueZ so a headset stays paired in both OSes (dual boot).
@@ -316,9 +316,10 @@ bash configs/bluetooth/bt-headset-mic-test.sh -n 8          # call-path test; --
 
 Result here: mSBC (wideband) calls 8 of 8 with the patch, 1 of 22 without. The headset must be the selected output
 device for stock WirePlumber to switch it into the call profile; with HDMI as output you also need the autoswitch
-override from the previous section, which works again once the plugin is patched. The mSBC-off drop-in
-(`51-g14-bluez.lua`) is no longer needed. Without the patch the only ways out are reconnecting the headset before
-each call, holding the headset profile manually and reconnecting when it goes silent, or a USB audio dongle.
+override from the previous section, which works again once the plugin is patched. Without the patch the only ways out
+are reconnecting the headset before each call, holding the headset profile manually and reconnecting when it goes
+silent, disabling mSBC (`bluez5.enable-msbc = false`, narrowband but the link is re-established reliably), or a USB
+audio dongle.
 The kernel lines `SCO packet for unknown connection handle` are late packets after a teardown and harmless.
 
 ### Headset "connected" in Bluetooth settings but missing from Sound devices

@@ -10,9 +10,9 @@
 # Settings > Sound), and refuses to "switch" to a remembered profile without a
 # microphone. See the header of that file for details.
 #
-# Also installs wireplumber/51-g14-bluez.lua (bluetooth.lua.d drop-in) which
-# disables mSBC: on the MT7925 adapter an mSBC audio link comes up empty and
-# blocks every later one, see the header of that file.
+# Note: a headset whose microphone works only once per connection is PipeWire
+# issue #5506, fixed by install-spa-bluez5-fix.sh; this override then works
+# as designed. Without that fix every automatic switch after the first fails.
 #
 # Usage (as desktop user, no root):
 #   bash configs/bluetooth/install-bt-headset-autoswitch.sh           # install + restart WirePlumber
@@ -27,9 +27,6 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SRC="$HERE/wireplumber/policy-bluetooth.lua"
 DEST_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/wireplumber/scripts"
 DEST="$DEST_DIR/policy-bluetooth.lua"
-SRC_BT="$HERE/wireplumber/51-g14-bluez.lua"
-DEST_BT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/wireplumber/bluetooth.lua.d"
-DEST_BT="$DEST_BT_DIR/51-g14-bluez.lua"
 STOCK=/usr/share/wireplumber/scripts/policy-bluetooth.lua
 # stock script the override was derived from (WirePlumber 0.4.17)
 STOCK_SHA=8fe690b14f01e677445f190a32a631d5a5fda6f157e683e0ebf7e80515ab20fa
@@ -59,12 +56,6 @@ check() {
     else
         echo "Override installed   : no"
     fi
-    if [ -f "$DEST_BT" ]; then
-        if cmp -s "$SRC_BT" "$DEST_BT"; then echo "mSBC-off drop-in     : yes ($DEST_BT, matches repo)"
-        else echo "mSBC-off drop-in     : yes ($DEST_BT, DIFFERS from repo copy)"; fi
-    else
-        echo "mSBC-off drop-in     : no"
-    fi
     echo "Stock script sha256 : $( [ -r "$STOCK" ] && sha256sum "$STOCK" | cut -d' ' -f1 || echo n/a ) (expected $STOCK_SHA)"
     echo "Saved headset profile: $(grep -E '^saved-headset-profile' "$STATE" 2>/dev/null || echo '(none)')"
     echo "Configured default source: $(pw-metadata 0 default.configured.audio.source 2>/dev/null | grep -oE 'bluez_input[^"]*|alsa_input[^"]*' || echo unknown)"
@@ -91,26 +82,20 @@ case "${1:-}" in
     --revert)
         if [ -f "$DEST" ]; then rm -v "$DEST"; rmdir --ignore-fail-on-non-empty "$DEST_DIR" 2>/dev/null || true
         else echo "Nothing to revert: $DEST not present."; fi
-        if [ -f "$DEST_BT" ]; then rm -v "$DEST_BT"; rmdir --ignore-fail-on-non-empty "$DEST_BT_DIR" 2>/dev/null || true
-        else echo "Nothing to revert: $DEST_BT not present."; fi
         restart_wp ;;
     "")
         check_compat
         install -D -m 0644 "$SRC" "$DEST"
         echo "Installed $DEST"
-        install -D -m 0644 "$SRC_BT" "$DEST_BT"
-        echo "Installed $DEST_BT (mSBC disabled, calls use CVSD)"
-        # Drop a remembered mic-less "headset profile" so the first call works,
-        # and a remembered mSBC profile that no longer exists with mSBC off.
-        if grep -qE '^saved-headset-profile:.*=(a2dp-|headset-head-unit-msbc$)' "$STATE" 2>/dev/null; then
-            echo "Removing remembered A2DP/mSBC 'headset profile' from $STATE"
+        # Drop a remembered mic-less "headset profile" so the first call works.
+        if grep -qE '^saved-headset-profile:.*=a2dp-' "$STATE" 2>/dev/null; then
+            echo "Removing remembered A2DP 'headset profile' from $STATE"
             systemctl --user stop wireplumber
-            sed -i -E '/^saved-headset-profile:.*=(a2dp-|headset-head-unit-msbc$)/d' "$STATE"
+            sed -i '/^saved-headset-profile:.*=a2dp-/d' "$STATE"
         fi
         restart_wp
         echo
-        echo "Done. Disconnect and reconnect the headset once so the profile list is rebuilt."
-        echo "Select the headset as INPUT device once (GNOME Settings > Sound > Input);"
+        echo "Done. Select the headset as INPUT device once (GNOME Settings > Sound > Input);"
         echo "calls in Firefox/Chrome/Teams then switch it to the headset profile automatically,"
         echo "regardless of which output device is selected." ;;
     *)
